@@ -1,30 +1,78 @@
 #include <arpa/inet.h>
 #include <asm-generic/socket.h>
+#include <assert.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <time.h>
 #include <unistd.h>
 
 #define MYPORT "3496"
 
-time_t rawtime;
+const size_t k_max_msg = 4096;
 
-void handleData(int fd) {
-  char msg[10];
-  recv(fd, msg, sizeof(msg), 0);
-  printf("(%ld) client said: %s \n", rawtime, msg);
-  char buf[] = "OK";
-  send(fd, buf, sizeof(buf), 0);
+static int32_t read_full(int fd, char *buf, size_t n) {
+  while (n > 0) {
+    ssize_t rv = read(fd, buf, n);
+    if (rv <= 0) {
+      return -1; // error, or unexpected EOF
+    }
+    assert((size_t)rv <= n);
+    n -= (size_t)rv;
+    buf += rv;
+  }
+  return 0;
+}
+
+static int32_t write_all(int fd, const char *buf, size_t n) {
+  while (n > 0) {
+    ssize_t rv = send(fd, buf, n, 0);
+    if (rv <= 0) {
+      return -1; // error
+    }
+    assert((size_t)rv <= n);
+    n -= (size_t)rv;
+    buf += rv;
+  }
+  return 0;
+}
+
+static int32_t one_request(int connfd) {
+  // 4 bytes header
+  char rbuf[4];
+  int errno = 0;
+  int32_t err = read_full(connfd, rbuf, 4);
+  if (err) {
+    if (errno == 0) {
+      printf("EOF\n");
+    } else {
+      printf("read() error\n");
+    }
+    return err;
+  }
+  printf("rbuf1=%s\n", rbuf);
+  uint32_t len = 0;
+  len |= ((uint32_t)rbuf[0] & 0xFF) << 24;
+  len |= ((uint32_t)rbuf[1] & 0xFF) << 16;
+  len |= ((uint32_t)rbuf[2] & 0xFF) << 8;
+  len |= ((uint32_t)rbuf[3] & 0xFF);
+  // memcpy(&len, rbuf, 4); // assume little endian
+  // len = ntohl(len);
+
+  printf("Received length11: %u\n", len);
+  printf("rbuf=%s, len=%d\n", rbuf, len);
+  if (len > k_max_msg) {
+    printf("too long: %d\n", len);
+    return -1;
+  }
+  return 0;
 }
 
 int main(int argc, char *argv[]) {
   struct addrinfo hints, *res;
 
   int socketfd;
-  time(&rawtime);
   memset(&hints, 0, sizeof hints);
   hints.ai_family = AF_INET;
   hints.ai_socktype = SOCK_STREAM;
@@ -58,7 +106,13 @@ int main(int argc, char *argv[]) {
     if (clientfd < 0) {
       continue; // error
     }
-    handleData(clientfd);
+
+    while (1) {
+      int32_t err = one_request(clientfd);
+      if (err) {
+        break;
+      }
+    }
     close(clientfd);
   }
   freeaddrinfo(res);
